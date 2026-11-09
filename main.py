@@ -1,5 +1,5 @@
 
-from src.document_loader import load_pdf, split_text
+from src.document_loader import load_pdf
 from src.vector_store import VectorStore
 
 
@@ -7,33 +7,33 @@ def main():
     pdf_path = "data/sample.pdf"
 
     print("Loading PDF...")
-    text = load_pdf(pdf_path)
-
-    chunks = split_text(
-        text,
+    records = load_pdf(
+        pdf_path,
         chunk_size=1000,
         chunk_overlap=200,
     )
 
-    print(f"\nTotal chunks: {len(chunks)}")
+    print(f"\nTotal chunks: {len(records)}")
 
     vector_store = VectorStore()
 
-    print("\nGenerating embeddings...")
-    vector_store.add_documents(chunks)
+    print("\nGenerating embeddings and storing metadata...")
+    vector_store.add_documents(records)
 
-    query = "What does an agent do in Agentic RAG?"
+    query = "Why do Transformers use positional encoding?"
 
     print(f"\nSearching for: {query}")
 
     results = vector_store.search(query, top_k=3)
 
-    for index, (document, distance) in enumerate(
-        results, start=1
-    ):
-        print(f"\nResult {index}")
-        print(f"Cosine distance: {distance:.4f}")
-        print(f"Text: {document}")
+    for index, result in enumerate(results, start=1):
+        metadata = result["metadata"]
+
+        print(f"\n--- Result {index} ---")
+        print(f"Source: {metadata['source']}")
+        print(f"Page: {metadata['page']}")
+        print(f"Cosine distance: {result['distance']:.4f}")
+        print(f"Text: {result['text'][:500]}")
 
 
 if __name__ == "__main__":
