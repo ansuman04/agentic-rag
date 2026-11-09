@@ -61,3 +61,6 @@ outputs/
 
 # Local databases
 *.sqlite3
+
+# CrewAI local runtime files and execution traces
+.crewai/
