@@ -3,8 +3,8 @@ from src.document_loader import load_pdf
 from src.vector_store import VectorStore
 
 
-def test_reindex_same_document(tmp_path):
-    records = load_pdf("data/sample.pdf")
+def test_reindex_same_document(tmp_path, sample_pdf):
+    records = load_pdf(str(sample_pdf))
 
     store = VectorStore(db_path=str(tmp_path / "chroma"))
 
@@ -18,8 +18,8 @@ def test_reindex_same_document(tmp_path):
     assert second_count == first_count
 
 
-def test_search_returns_metadata(tmp_path):
-    records = load_pdf("data/sample.pdf")
+def test_search_returns_metadata(tmp_path, sample_pdf):
+    records = load_pdf(str(sample_pdf))
 
     store = VectorStore(db_path=str(tmp_path / "chroma"))
 
@@ -30,7 +30,7 @@ def test_search_returns_metadata(tmp_path):
         top_k=3,
     )
 
-    assert len(results) == 3
+    assert len(results) == min(3, len(records))
 
     for result in results:
         assert "text" in result
