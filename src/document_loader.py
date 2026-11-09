@@ -1,30 +1,8 @@
 
+import hashlib
 from pathlib import Path
+
 from pypdf import PdfReader
-
-
-def load_pdf(file_path: str) -> str:
-    """Extract text from a PDF document."""
-    path = Path(file_path)
-
-    if not path.is_file():
-        raise FileNotFoundError(f"PDF not found: {file_path}")
-
-    reader = PdfReader(str(path))
-
-    pages = []
-
-    for page_number, page in enumerate(reader.pages, start=1):
-        text = page.extract_text()
-
-        if text and text.strip():
-            pages.append(text.strip())
-            print(f"Page {page_number}: {len(text)} characters")
-
-    if not pages:
-        raise ValueError("No extractable text found in PDF")
-
-    return "\n\n".join(pages)
 
 
 def split_text(
@@ -55,3 +33,60 @@ def split_text(
             break
 
     return chunks
+
+
+def load_pdf(
+    file_path: str,
+    chunk_size: int = 1000,
+    chunk_overlap: int = 200,
+) -> list[dict]:
+    """Load a PDF and return chunks with source metadata."""
+
+    path = Path(file_path)
+
+    if not path.is_file():
+        raise FileNotFoundError(f"PDF not found: {file_path}")
+
+    document_id = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    reader = PdfReader(str(path))
+    records = []
+
+    for page_number, page in enumerate(reader.pages, start=1):
+        text = page.extract_text()
+
+        if not text or not text.strip():
+            continue
+
+        chunks = split_text(
+            text.strip(),
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+
+        for chunk_index, chunk in enumerate(chunks):
+            records.append(
+                {
+                    "id": (
+                        f"{document_id}_page_{page_number}"
+                        f"_chunk_{chunk_index}"
+                    ),
+                    "text": chunk,
+                    "metadata": {
+                        "source": path.name,
+                        "page": page_number,
+                        "chunk_index": chunk_index,
+                        "document_id": document_id,
+                    },
+                }
+            )
+
+        print(
+            f"Page {page_number}: "
+            f"{len(text)} characters, {len(chunks)} chunks"
+        )
+
+    if not records:
+        raise ValueError("No extractable text found in PDF")
+
+    return records
