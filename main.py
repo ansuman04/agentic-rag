@@ -1,39 +1,43 @@
 
 from src.document_loader import load_pdf
 from src.vector_store import VectorStore
-
+from src.rag_service import RAGService
+from src.llm_client import LocalLLM
 
 def main():
     pdf_path = "data/sample.pdf"
 
-    print("Loading PDF...")
-    records = load_pdf(
-        pdf_path,
-        chunk_size=1000,
-        chunk_overlap=200,
+    print("Loading and indexing PDF...")
+    records = load_pdf(pdf_path)
+
+    store = VectorStore()
+    store.add_documents(records)
+
+    print("\nPDF indexed successfully.")
+
+    llm = LocalLLM()
+
+    rag = RAGService(
+        vector_store=store,
+        llm=llm,
     )
 
-    print(f"\nTotal chunks: {len(records)}")
+    question = "Why do Transformers use positional encoding?"
 
-    vector_store = VectorStore()
+    print(f"\nQuestion: {question}")
 
-    print("\nGenerating embeddings and storing metadata...")
-    vector_store.add_documents(records)
+    result = rag.answer(question)
 
-    query = "Why do Transformers use positional encoding?"
+    print("\nGenerated Answer:")
+    print(result["answer"])
 
-    print(f"\nSearching for: {query}")
+    print("\nRetrieved Sources:")
 
-    results = vector_store.search(query, top_k=3)
-
-    for index, result in enumerate(results, start=1):
-        metadata = result["metadata"]
-
-        print(f"\n--- Result {index} ---")
-        print(f"Source: {metadata['source']}")
-        print(f"Page: {metadata['page']}")
-        print(f"Cosine distance: {result['distance']:.4f}")
-        print(f"Text: {result['text'][:500]}")
+    for source in result["sources"]:
+        print(
+            f"{source['citation']} "
+            f"(distance={source['distance']:.4f})"
+        )
 
 
 if __name__ == "__main__":
