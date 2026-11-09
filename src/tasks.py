@@ -22,3 +22,24 @@ def create_routing_task(
         ),
         agent=agent,
     )
+
+
+def create_retrieval_task(
+    agent: Agent,
+    question: str,
+) -> Task:
+    return Task(
+        description=(
+            f"Retrieve information to answer:\n{question}\n\n"
+            "You MUST use the document_search tool. "
+            "Retrieve relevant passages from the indexed PDF. "
+            "Return the evidence with its source filename "
+            "and page number. Do not invent information."
+        ),
+        expected_output=(
+            "Relevant document passages with filename "
+            "and page references."
+        ),
+        agent=agent,
+    )
+
