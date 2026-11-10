@@ -5,6 +5,11 @@ from src.tasks import create_document_summary_task
 from crewai import Crew, Process
 import logging
 from openai import InternalServerError
+from src.relevance_grader import RelevanceGrader
+from src.llm_relevance_scorer import LLMRelevanceScorer
+from src.relevance_grader import RelevanceGrader
+from src.llm_relevance_scorer import LLMRelevanceScorer
+from openai import InternalServerError
 
 logger = logging.getLogger(__name__)
 
@@ -76,26 +81,50 @@ class AgentOrchestrator:
             f"Unsupported routing decision: {route!r}"
         )
 
+
 def build_retrieval_response(
     question: str,
     route: str,
     retrieval_result: dict,
 ) -> dict:
     evidence = retrieval_result["evidence"]
+
+    relevant_evidence = retrieval_result.get(
+        "relevant_evidence",
+        evidence,
+    )
+
+    rejected_evidence = retrieval_result.get(
+        "rejected_evidence",
+        [],
+    )
+
     error = retrieval_result.get("error")
 
-    if error:
+    if error and error.get("type") == (
+        "relevance_grading_error"
+    ):
+        status = "grading_failed"
+
+    elif error:
         status = "generation_failed"
-    elif evidence:
-        status = "retrieved"
-    else:
+
+    elif not evidence:
         status = "no_evidence"
+
+    elif not relevant_evidence:
+        status = "no_relevant_evidence"
+
+    else:
+        status = "retrieved"
 
     return {
         "question": question,
         "route": route,
         "status": status,
         "evidence": evidence,
+        "relevant_evidence": relevant_evidence,
+        "rejected_evidence": rejected_evidence,
         "agent_output": retrieval_result["agent_output"],
         "error": error,
     }
@@ -153,6 +182,94 @@ def run_summary_safely(
         }
 
 
+def grade_and_summarize(
+    question: str,
+    evidence: list[dict],
+    grader: RelevanceGrader,
+    summary_agent,
+    task_factory,
+) -> dict:
+    """
+    Grade retrieved evidence and summarize relevant results.
+
+    Preserve original evidence if grading or
+    summarization fails.
+    """
+
+    if not evidence:
+        return {
+            "evidence": [],
+            "relevant_evidence": [],
+            "rejected_evidence": [],
+            "agent_output": None,
+            "error": None,
+        }
+
+    # Grade retrieved evidence.
+    try:
+        grading_result = grader.grade(
+            question=question,
+            evidence=evidence,
+        )
+
+    except (ValueError, InternalServerError) as exc:
+        logger.warning(
+            "Relevance grading failed: %s",
+            exc,
+        )
+
+        return {
+            "evidence": evidence,
+            "relevant_evidence": [],
+            "rejected_evidence": [],
+            "agent_output": None,
+            "error": {
+                "type": "relevance_grading_error",
+                "message": (
+                    "Unable to grade retrieved evidence."
+                ),
+            },
+        }
+
+    relevant_evidence = grading_result[
+        "relevant_evidence"
+    ]
+
+    rejected_evidence = grading_result[
+        "rejected_evidence"
+    ]
+
+    # All evidence was graded irrelevant.
+    if not relevant_evidence:
+        return {
+            "evidence": evidence,
+            "relevant_evidence": [],
+            "rejected_evidence": rejected_evidence,
+            "agent_output": None,
+            "error": None,
+        }
+
+    # Summarize only relevant evidence.
+    task = task_factory(
+        agent=summary_agent,
+        question=question,
+        evidence=relevant_evidence,
+    )
+
+    summary_result = run_summary_safely(
+        agent=summary_agent,
+        task=task,
+        evidence=relevant_evidence,
+    )
+
+    return {
+        "evidence": evidence,
+        "relevant_evidence": relevant_evidence,
+        "rejected_evidence": rejected_evidence,
+        "agent_output": summary_result["agent_output"],
+        "error": summary_result["error"],
+    }
+
 
 def build_local_orchestrator() -> AgentOrchestrator:
     """Build the local Agentic RAG workflow."""
@@ -175,6 +292,11 @@ def build_local_orchestrator() -> AgentOrchestrator:
     # LLM-based evidence summarization.
     web_summary_agent = create_web_summary_agent()
 
+    relevance_scorer = LLMRelevanceScorer()
+
+    relevance_grader = RelevanceGrader(
+        scorer=relevance_scorer.score
+    )
     def route_question(question: str) -> str:
         task = create_routing_task(
             router_agent,
@@ -184,63 +306,34 @@ def build_local_orchestrator() -> AgentOrchestrator:
 
     
     def retrieve_question(question: str) -> dict:
-        # 1. Retrieve original document passages.
+        # Step 1: Retrieve original evidence from ChromaDB.
         evidence = document_retrieval_service.retrieve(
             question
         )
 
-        # 2. Handle an empty knowledge base or no matches.
-        if not evidence:
-            return {
-                "evidence": [],
-                "agent_output": None,
-            }
-
-        # 3. Give the evidence to the CrewAI summarizer.
-        task = create_document_summary_task(
-            agent=document_summary_agent,
+        # Step 2: Grade and summarize only relevant evidence.
+        return grade_and_summarize(
             question=question,
             evidence=evidence,
+            grader=relevance_grader,
+            summary_agent=document_summary_agent,
+            task_factory=create_document_summary_task,
         )
-
-        # 4. Generate a summary without searching again.
-        return run_summary_safely(
-            agent=document_summary_agent,
-            task=task,
-            evidence=evidence,
-        )
-
-
+ 
     def search_web(question: str) -> dict:
-        # 1. Retrieve structured evidence from Tavily.
-        evidence = web_retrieval_service.retrieve(question)
+        # Step 1: Retrieve original evidence from Tavily.
+        evidence = web_retrieval_service.retrieve(
+            question
+        )
 
-        # 2. Do not invoke the LLM if no evidence exists.
-        if not evidence:
-            return {
-                "evidence": [],
-                "agent_output": None,
-            }
-
-        # 3. Give the already-retrieved evidence to CrewAI.
-        task = create_web_summary_task(
-            agent=web_summary_agent,
+        # Step 2: Grade and summarize only relevant evidence.
+        return grade_and_summarize(
             question=question,
             evidence=evidence,
+            grader=relevance_grader,
+            summary_agent=web_summary_agent,
+            task_factory=create_web_summary_task,
         )
-
-        # 4. The agent summarizes; it cannot call Tavily.
-        agent_output = run_agent(
-            web_summary_agent,
-            task,
-        )
-
-        return run_summary_safely(
-            agent=web_summary_agent,
-            task=task,
-            evidence=evidence,
-        )
-
 
     return AgentOrchestrator(
         router=route_question,
