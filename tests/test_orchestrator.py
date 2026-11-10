@@ -70,3 +70,37 @@ def test_empty_question():
 
     with pytest.raises(ValueError):
         orchestrator.run("   ")
+
+
+def test_websearch_route_calls_web_agent():
+    calls = []
+
+    def router(question):
+        calls.append("router")
+        return "websearch"
+
+    def retriever(question):
+        raise AssertionError(
+            "Document retriever should not run."
+        )
+
+    def web_search(question):
+        calls.append("websearch")
+        return (
+            "Python release information from "
+            "https://www.python.org/"
+        )
+
+    orchestrator = AgentOrchestrator(
+        router=router,
+        retriever=retriever,
+        web_search=web_search,
+    )
+
+    result = orchestrator.run(
+        "What is the latest Python release?"
+    )
+
+    assert result["route"] == "websearch"
+    assert "python.org" in result["evidence"]
+    assert calls == ["router", "websearch"]
