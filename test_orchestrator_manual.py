@@ -19,12 +19,30 @@ def main():
 
         print("Selected Route:", result["route"])
         print("Status:", result["status"])
+        
+        print(
+            "Total Retrieved:",
+            len(result["evidence"]),
+        )
+
+        print(
+            "Relevant Evidence:",
+            len(result["relevant_evidence"]),
+        )
+
+        print(
+            "Rejected Evidence:",
+            len(result["rejected_evidence"]),
+        )
+
+        if result.get("error"):
+            print("Error:", result["error"])
+
 
         print("\nOriginal Retrieved Evidence:")
 
         for index, item in enumerate(
-            result["evidence"],
-            start=1,
+            result["relevant_evidence"], start=1
         ):
             print(f"\nSource {index}")
 

@@ -1,10 +1,10 @@
 # Agentic RAG — Local PDF and Web Retrieval with CrewAI, ChromaDB, Tavily, and Ollama
 
-An educational and portfolio project that combines **Retrieval-Augmented Generation (RAG)** with **CrewAI-based question routing**. It supports two information sources: locally indexed PDF documents in ChromaDB and public web search through Tavily. Retrieval evidence is kept separate from LLM-generated summaries so future grading, citation verification, and evaluation can use the actual retrieved material.
+An educational and portfolio project that combines **Retrieval-Augmented Generation (RAG)** with **CrewAI-based question routing**. It supports two information sources: locally indexed PDF documents in ChromaDB and public web search through Tavily. Retrieval evidence is preserved separately from relevance-grading decisions and LLM-generated answers, allowing inspection of both accepted and rejected sources.
 
-**Current status (November 10, 2026):** Traditional local PDF RAG works end-to-end. The newer CrewAI orchestration routes questions to either document retrieval or live web retrieval, then summarizes the returned evidence with local Qwen2.5 through Ollama. Both paths return structured evidence and a separate agent-generated summary. Recognized LLM HTTP 500 failures during summarization can be reported without discarding successfully retrieved evidence. **29 automated tests passed** in the most recent local run; both manual routing scenarios completed successfully.
+**Current status (November 10, 2026):** Traditional local PDF RAG works end-to-end. CrewAI routes questions to ChromaDB document retrieval or Tavily web search. A local Qwen2.5 relevance grader evaluates retrieved evidence in a batch, preserving the original results while separating relevant and rejected items. Only relevant evidence is supplied to the document or web summarizer. Recognized grading errors and summarization HTTP 500 errors produce structured failure responses while retaining original evidence. **58 automated tests passed**, as reported from the latest local test run; recent manual executions of both routes succeeded.
 
-> **Scope:** The orchestration flow currently *retrieves and summarizes* evidence. It does not yet run a dedicated relevance grader, hallucination/grounding grader, or independently verified final-answer generator.
+> **Scope:** Relevance classification is implemented. Independent claim-by-claim grounding verification, citation auditing, retrieval reranking and controlled self-correction are **not** yet implemented.
 
 ## Architecture
 
@@ -27,54 +27,52 @@ This is the original, separate `RAGService` implementation: it retrieves documen
 ### 2. CrewAI orchestration (`test_orchestrator_manual.py`)
 
 ```text
-                         User question
-                               |
-                               v
+                       User question
+                            |
+                            v
                     CrewAI Router Agent
-                       (Qwen2.5 / Ollama)
-                               |
-                  +------------+------------+
-                  |                         |
-             "vectorstore"               "websearch"
-                  |                         |
-                  v                         v
-       DocumentRetrievalService      WebRetrievalService
-                  |                         |
-                  v                         v
-        ChromaDB similarity search     WebSearchTool → Tavily
-                  |                         |
-                  v                         v
-        Structured PDF passages       Structured web results
-       (text, source, page, etc.)    (title, URL, snippet)
-                  |                         |
-                  v                         v
-       Document Evidence             Web Evidence
-       Summarizer (CrewAI)           Summarizer (CrewAI)
-                  |                         |
-                  +------------+------------+
-                               |
-                               v
-                    Structured response:
-                    - question
-                    - route
-                    - status
-                    - evidence       (original retrieved data)
-                    - agent_output   (LLM-generated summary)
-                    - error          (if applicable)
+                            |
+               +------------+------------+
+               |                         |
+          "vectorstore"              "websearch"
+               |                         |
+               v                         v
+   DocumentRetrievalService      WebRetrievalService
+               |                         |
+          ChromaDB                 Tavily WebSearchTool
+               |                         |
+               +------------+------------+
+                            |
+                   Structured evidence
+                            |
+                  CrewAI Relevance Grader
+                      (Qwen2.5)
+                            |
+                +-----------+-----------+
+                |                       |
+        Relevant evidence         Rejected evidence
+                |
+                v
+       Document / Web Summarizer
+                |
+                v
+                  Structured response
+        question, route, status, evidence,
+        relevant_evidence, rejected_evidence,
+                 agent_output, error
 ```
 
-**Separation of responsibilities:**
+**Responsibilities:**
 
-- The **Router Agent** decides between `vectorstore` and `websearch`; it does not retrieve documents or websites itself.
-- **Python retrieval services** call ChromaDB or Tavily directly, once per normal branch execution. They convert results to a structured `list[dict]` **without asking the LLM to rewrite the evidence**.
-- **CrewAI summarizers** receive the already-retrieved evidence as task input. They have no retrieval tools attached, so they do not initiate another Tavily or ChromaDB search.
-- `AgentOrchestrator` dispatches each question and returns the evidence separately from the generated summary. This enables later grounding checks against retrieved material rather than an earlier LLM paraphrase.
-
-`AgentOrchestrator` (`src/orchestrator.py`) accepts plain Python callables for its router and retrieval branches, making orchestration testable without live services. `build_local_orchestrator()` wires in the actual components. Empty questions or unrecognized route labels raise `ValueError`.
+- The **Router Agent** selects `vectorstore` or `websearch`.
+- The retrieval services query ChromaDB or Tavily and return structured evidence without an LLM rewriting it. Tavily returns up to five search results with snippets truncated to 500 characters.
+- `LLMRelevanceScorer` runs a tool-free CrewAI grader using local Qwen2.5. The service returns an ordered list of boolean relevance decisions (also normalizing exact boolean strings such as `"true"`/`"false"`). `RelevanceGrader` splits results into accepted and rejected evidence while preserving the original objects.
+- Document and web summarizers receive **only accepted evidence**. If nothing is relevant, summarization is skipped.
+- `AgentOrchestrator` keeps all original evidence in the response. The orchestrator can be tested using plain callable stubs without live Ollama or Tavily.
 
 ### 3. Retrieval-response contract
 
-A successful web request has the following *shape* (sample content is illustrative):
+Example *shape* for a successful web request (illustrative values):
 
 ```json
 {
@@ -82,30 +80,33 @@ A successful web request has the following *shape* (sample content is illustrati
   "route": "websearch",
   "status": "retrieved",
   "evidence": [
-    {
-      "title": "Example source",
-      "url": "https://example.com/weather",
-      "snippet": "Example retrieved information"
-    }
+    {"title": "Source A", "url": "https://example.com/a", "snippet": "Relevant observation"},
+    {"title": "Source B", "url": "https://example.com/b", "snippet": "Unrelated results"}
   ],
-  "agent_output": "Summary based on the sources.",
+  "relevant_evidence": [
+    {"title": "Source A", "url": "https://example.com/a", "snippet": "Relevant observation"}
+  ],
+  "rejected_evidence": [
+    {"title": "Source B", "url": "https://example.com/b", "snippet": "Unrelated results"}
+  ],
+  "agent_output": "A concise answer citing Source A.",
   "error": null
 }
 ```
 
-For `vectorstore`, each evidence item instead includes `text`, `source`, `page`, `chunk_index`, `document_id`, and `distance` (cosine-distance output from the retrieval layer).
-
-The current response statuses are:
+For `vectorstore`, evidence items contain `text`, `source`, `page`, `chunk_index`, `document_id`, and `distance`.
 
 | Status | Meaning |
 | --- | --- |
-| `retrieved` | Evidence was found and the summarizer returned output. This **does not** mean facts were independently validated. |
-| `no_evidence` | The retrieval service found no results; `agent_output` is `null`. |
-| `generation_failed` | Retrieval succeeded, but a recognized LLM server error interrupted summarization; structured evidence is still returned. |
+| `retrieved` | Relevant evidence was found, and the summarizer returned output; **not** an independent factual-grounding guarantee. |
+| `no_evidence` | Retrieval returned no results; grading and summarization are skipped. |
+| `no_relevant_evidence` | Retrieval succeeded, but the grader rejected every item; summarization is skipped. |
+| `grading_failed` | Grading returned invalid decisions or a recognized LLM server error. Original evidence is retained; no evidence is classified or summarized. |
+| `generation_failed` | Grading succeeded, but a recognized LLM server error prevented summarization. Original and graded evidence are retained. |
 
-Recovery currently catches `openai.InternalServerError` from the Ollama/OpenAI-compatible summarization call (including the observed HTTP 500 token-repetition failure). Other errors generally propagate. A Router Agent failure happens **before** retrieval and is not covered by this post-retrieval recovery.
+The grading recovery catches expected `ValueError` and `openai.InternalServerError` failures, returning a `relevance_grading_error`. Summarization recovery handles `openai.InternalServerError` and returns an `llm_generation_error`. Unexpected exceptions and failures during routing or source retrieval may propagate. `rejected_evidence=[]` on `grading_failed` **does not** mean every source passed or failed grading; grading did not complete.
 
-The evidence is retained **in memory for the request**, not saved to a new evidence database. Web snippets are capped at **500 characters each** before being returned from `WebSearchTool`; this preserves the exact normalized tool results, **not** full original web-page contents.
+Evidence is retained in the response, not persisted to a separate evidence database. Web snippets represent tool-returned excerpts capped at 500 characters, **not** the full original web pages.
 
 ## Technology stack
 
@@ -116,7 +117,7 @@ The evidence is retained **in memory for the request**, not saved to a new evide
 | Embeddings | `BAAI/bge-small-en-v1.5` via Sentence Transformers | 384-dimensional vectors |
 | Vector database | ChromaDB | Persistent local similarity search |
 | Local inference | Ollama + `qwen2.5:7b` | Traditional RAG and CrewAI agent reasoning |
-| Agents and tasks | CrewAI | Routing, evidence summarization, and legacy tool-based demos |
+| Agents and tasks | CrewAI | Routing, batch relevance grading, summarization, and legacy tool-based demos |
 | Live web search | Tavily (`tavily-python`) | Public web results with titles, URLs, and snippets |
 | LLM-compatible client | OpenAI Python client (via CrewAI) | Connect CrewAI to local Ollama endpoint |
 | Tests | pytest, unittest.mock, ReportLab | Unit tests, mocked integrations, generated PDF fixtures |
@@ -135,21 +136,22 @@ The evidence is retained **in memory for the request**, not saved to a new evide
 - Route CrewAI requests to `vectorstore` or `websearch`.
 - Retrieve structured document evidence via `DocumentRetrievalService` and structured web evidence via `WebRetrievalService`.
 - Call Tavily through `WebSearchTool`, returning up to five results with a 500-character snippet cap.
-- Run tool-free CrewAI **Document Evidence Summarizer** and **Web Evidence Summarizer** over supplied evidence.
-- Return `evidence` and `agent_output` as separate fields with a consistent response format on both routes.
-- Preserve successfully retrieved evidence if an `openai.InternalServerError` occurs during summarization.
+- Grade retrieved results using a tool-free CrewAI **Evidence Relevance Grader**, separating relevant from rejected items before summarization.
+- Run tool-free CrewAI **Document Evidence Summarizer** and **Web Evidence Summarizer** on relevant evidence only.
+- Return original `evidence`, `relevant_evidence`, `rejected_evidence`, and `agent_output` as separate fields with a consistent response format on both routes.
+- Preserve successfully retrieved evidence when expected grading errors occur, or when an `openai.InternalServerError` occurs during summarization.
 - Retain the original `DocumentSearchTool`, tool-based Document Retriever Agent, and related manual tests for learning/reference.
-- Run **29 automated tests** (latest verified local result: November 10, 2026). Manual agent/integration scripts are separate.
+- Run **58 automated tests** (latest user-reported result: November 10, 2026). Manual agent/integration scripts are separate.
 
 ### Known limitations
 
-- **No relevance or grounding grader yet.** A fluent summary can still ignore relevant data or make unsupported claims.
-- **Web result quality varies.** Tavily may return monthly forecasts, old pages, or otherwise irrelevant snippets for a current-information question; results are not yet reranked or freshness-validated.
+- **No grounding or hallucination verifier yet.** The relevance grader decides whether source snippets appear useful; it does not verify individual claims in the final answer.
+- **Web result quality varies.** Tavily may return monthly forecasts and stale pages. The relevance grader can filter irrelevant snippets, but freshness is not independently validated.
 - **Retrieval ranking is imperfect.** The lowest-distance ChromaDB chunk is not always the most useful passage.
 - **Web evidence is truncated.** The preserved snippet is the tool's 500-character representation, not the full Tavily result or page text.
 - **PDF ingestion is not failure-atomic.** Existing chunks are deleted before replacements are written, and different files with the same name can collide.
 - **Citations are not independently checked.** Returned titles/URLs/page numbers reflect retrieved metadata, but summaries may still misinterpret them.
-- **LLM recovery is limited.** Recognized HTTP 500 summarization errors are handled after retrieval; router failures, other LLM exceptions, malformed search data, and external API failures may still raise errors.
+- **LLM recovery is limited.** Expected grading `ValueError`/HTTP 500 errors and HTTP 500 summarization errors are handled after retrieval; router failures, other LLM exceptions, malformed source retrieval data, and external API failures may still raise errors.
 - **Not yet a production service.** No API server, authentication, deployment, persistent evaluation results, or operational monitoring is included.
 
 ## Project structure
@@ -165,12 +167,14 @@ agentic-rag/
 │   ├── document_retrieval.py          # Structured ChromaDB evidence
 │   ├── web_tools.py                   # Tavily WebSearchTool; 500-char snippets
 │   ├── web_retrieval.py               # Structured Tavily evidence
+│   ├── relevance_grader.py            # Separate relevant/rejected evidence
+│   ├── llm_relevance_scorer.py        # CrewAI grader and JSON decision parsing
 │   ├── llm_client.py                  # Ollama client for traditional RAG
 │   ├── rag_service.py                 # Traditional RAG answering
-│   ├── agents.py                      # Router, summarizers, legacy agents
+│   ├── agents.py                      # Router, relevance grader, summarizers
 │   ├── tasks.py                       # CrewAI task instructions
 │   ├── tools.py                       # Legacy CrewAI DocumentSearchTool
-│   └── orchestrator.py                # Routing, response format, LLM recovery
+│   └── orchestrator.py                # Routing, grading, response, error recovery
 ├── tests/
 │   ├── conftest.py                    # Generated PDF fixture
 │   ├── test_vector_store.py
@@ -180,11 +184,17 @@ agentic-rag/
 │   ├── test_web_search_tool.py
 │   ├── test_web_retrieval.py
 │   ├── test_orchestrator.py
-│   └── test_llm_failure_recovery.py
+│   ├── test_llm_failure_recovery.py
+│   ├── test_relevance_grader.py
+│   ├── test_llm_relevance_scorer.py
+│   ├── test_grading_pipeline.py
+│   ├── test_grading_failure_recovery.py
+│   └── test_response_contract.py
 ├── main.py                            # Traditional RAG demo
 ├── test_router_manual.py              # Legacy manual Router test
 ├── test_retriever_manual.py           # Legacy tool-based Retriever test
-├── test_orchestrator_manual.py        # Both routes, evidence + summary
+├── test_orchestrator_manual.py        # Both routes, graded evidence + summary
+├── test_relevance_manual.py           # Standalone live Qwen2.5 grader
 ├── test_web_retrieval_manual.py       # Direct Tavily retrieval (no LLM)
 ├── requirements.txt
 ├── .gitignore
@@ -210,7 +220,7 @@ py -3.12 -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-> The changes described here are being developed in `feature/web-search`. Until the branch is merged, check out that branch before testing these new features: `git fetch origin; git switch feature/web-search` (assuming it has already been pushed). If the changes exist only in your local working tree, stay on your current feature branch.
+> Relevance-grading work is being developed on `feature/relevance-grading`. The previously completed web-search changes have already been merged into `main`. Check out the feature branch to try grading before its own pull request is merged.
 
 If PowerShell blocks activation, run `\.venv\Scripts\python.exe` directly or select an execution-policy approach appropriate for your system.
 
@@ -271,7 +281,7 @@ python test_web_retrieval_manual.py
 python test_orchestrator_manual.py
 ```
 
-The end-to-end script asks why Transformers use positional encoding (expected route: `vectorstore`) and asks about Bengaluru weather (expected route: `websearch`). For each, it prints the selected route, status, structured evidence, and the CrewAI-generated summary.
+The end-to-end script asks why Transformers use positional encoding (expected route: `vectorstore`) and asks about Bengaluru weather (expected route: `websearch`). For each, it prints the selected route, status, total retrieved results, relevant/rejected counts, selected evidence, and the CrewAI-generated summary. The standalone `python test_relevance_manual.py` script checks live relevance classification against three sample passages.
 
 The document branch needs a populated local ChromaDB collection to return document passages. The web branch can run without indexed PDFs, provided Tavily credentials and Ollama are available. Real web-search results change between runs, and a successful response does not guarantee its factual accuracy.
 
@@ -281,9 +291,9 @@ The document branch needs a populated local ChromaDB collection to return docume
 python -m pytest tests/ -v
 ```
 
-**Latest observed result:** `29 passed in 21.63s` (November 10, 2026). These are primarily unit tests with mocked LLM, Tavily, and orchestration dependencies. The suite also uses locally generated PDF fixtures; vector tests may download the embedding model on first use. Automated tests do **not** establish that live Ollama or Tavily will always work.
+**Latest reported result:** `58 passed` (November 10, 2026). These are primarily unit tests with mocked LLM, Tavily, and orchestration dependencies. The suite also uses locally generated PDF fixtures; vector tests may download the embedding model on first use. Automated tests do **not** establish that live Ollama or Tavily will always work.
 
-Important test areas include source-field preservation, empty/invalid retrieval results, routing, and recovery from a mocked `openai.InternalServerError` without losing evidence. The separate manual orchestration script exercises live local inference and external Tavily search.
+Important test areas include source-field preservation, empty/invalid retrieval results, ordered relevance decisions, boolean-string normalization, evidence filtering, routing, five response statuses, and recovery from mocked grading and summarization failures without losing evidence. The separate manual orchestration script exercises live local inference and external Tavily search.
 
 ## Example response
 
@@ -300,7 +310,7 @@ For the document question **“Why do Transformers use positional encoding?”**
 }
 ```
 
-This is a schematic example, not a guarantee of a particular ranking or score. The model may cite page 6 in its summary, but citation accuracy and claim grounding are **not yet automatically graded**.
+This is a schematic example, not a guarantee of a particular ranking or score. The relevance grader may retain this passage; citation accuracy and the grounding of generated claims are **not yet automatically audited**.
 
 ## Privacy and repository hygiene
 
@@ -320,8 +330,11 @@ This is a schematic example, not a guarantee of a particular ranking or score. T
 - [x] Limit returned web snippets to 500 characters
 - [x] Separate structured source evidence from LLM-generated summaries on both routes
 - [x] Handle recognized Ollama/OpenAI-compatible HTTP 500 errors during summarization while retaining retrieved evidence
-- [x] Automated tests for retrieval, routing, evidence preservation, and failure handling (29 passing locally)
-- [ ] Add relevance grading and retrieval reranking
+- [x] CrewAI/Qwen2.5 relevance grading for retrieved PDF and web evidence
+- [x] Preserve original, relevant, and rejected evidence separately; skip summarization if no item is relevant
+- [x] Handle expected grader failures without losing retrieved evidence
+- [x] Automated tests for retrieval, routing, grading, response contracts, and failure handling (58 passing locally)
+- [ ] Add retrieval reranking beyond boolean relevance classification
 - [ ] Add dedicated final-answer generation and hallucination/grounding checks
 - [ ] Validate source citations and freshness of live information
 - [ ] Extend error handling for Router failures and other provider/network errors
@@ -331,8 +344,8 @@ This is a schematic example, not a guarantee of a particular ranking or score. T
 
 ## Development workflow
 
-Changes are developed on feature branches, verified with `python -m pytest tests/ -v`, and merged into `main` through pull requests. The structured web/document retrieval and summarization changes described here are being prepared on `feature/web-search`; they should not be treated as merged until the pull request is completed.
+Changes are developed on feature branches, verified with `python -m pytest tests/ -v`, and merged into `main` through pull requests. The earlier `feature/web-search` pull request has been merged. Relevance grading is currently on `feature/relevance-grading`, pending review and merge.
 
 ## Disclaimer
 
-This is an educational project, not a production-ready knowledge assistant. Retrieved search snippets may be incomplete, outdated, or inaccurate, and generated summaries are not independently fact-checked. Verify important claims using original sources.
+This is an educational project, not a production-ready knowledge assistant. Retrieved search snippets may be incomplete, outdated, or inaccurate. LLM-based relevance decisions can be wrong, and generated summaries are not independently fact-checked. Verify important claims using original sources.
