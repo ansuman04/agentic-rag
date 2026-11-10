@@ -122,3 +122,33 @@ def create_web_summary_agent() -> Agent:
         verbose=True,
         allow_delegation=False,
     )
+
+def create_document_summary_agent() -> Agent:
+    llm = LLM(
+        model="qwen2.5:7b",
+        custom_openai=True,
+        base_url="http://localhost:11434/v1",
+        api_key="ollama",
+        temperature=0,
+    )
+
+    return Agent(
+        role="Document Evidence Summarizer",
+        goal=(
+            "Summarize relevant document passages "
+            "accurately while preserving citations."
+        ),
+        backstory=(
+            "You are a document research specialist. "
+            "You receive passages already retrieved "
+            "from a vector database. "
+            "Use only the supplied passages. "
+            "Preserve document filenames and page numbers. "
+            "Do not invent facts or citations."
+        ),
+        llm=llm,
+        tools=[],
+        verbose=True,
+        allow_delegation=False,
+    )
+
