@@ -1,5 +1,7 @@
 
 from crewai import Agent, LLM
+from src.resilience import current_settings
+from src.llm_transport import DeadlineInterceptor
 from src.tools import DocumentSearchTool
 from src.web_tools import WebSearchTool
 
@@ -11,6 +13,9 @@ def create_router_agent() -> Agent:
         base_url="http://localhost:11434/v1",
         api_key="ollama",
         temperature=0,
+        timeout=current_settings().llm_timeout,
+        max_retries=0,
+        interceptor=DeadlineInterceptor(),
     )
 
     return Agent(
@@ -28,8 +33,9 @@ def create_router_agent() -> Agent:
             "should use web search."
         ),
         llm=llm,
-        verbose=True,
+        verbose=False,
         allow_delegation=False,
+        max_retry_limit=0,
     )
 
 def create_retriever_agent(
@@ -41,6 +47,9 @@ def create_retriever_agent(
         base_url="http://localhost:11434/v1",
         api_key="ollama",
         temperature=0,
+        timeout=current_settings().llm_timeout,
+        max_retries=0,
+        interceptor=DeadlineInterceptor(),
     )
 
     return Agent(
@@ -57,8 +66,9 @@ def create_retriever_agent(
         ),
         tools=[tool],
         llm=llm,
-        verbose=True,
+        verbose=False,
         allow_delegation=False,
+        max_retry_limit=0,
     )
 
 
@@ -71,6 +81,9 @@ def create_web_search_agent(
         base_url="http://localhost:11434/v1",
         api_key="ollama",
         temperature=0,
+        timeout=current_settings().llm_timeout,
+        max_retries=0,
+        interceptor=DeadlineInterceptor(),
     )
 
     return Agent(
@@ -91,8 +104,9 @@ def create_web_search_agent(
         ),
         tools=[tool],
         llm=llm,
-        verbose=True,
+        verbose=False,
         allow_delegation=False,
+        max_retry_limit=0,
     )
 
 
@@ -103,6 +117,9 @@ def create_web_summary_agent() -> Agent:
         base_url="http://localhost:11434/v1",
         api_key="ollama",
         temperature=0,
+        timeout=current_settings().llm_timeout,
+        max_retries=0,
+        interceptor=DeadlineInterceptor(),
     )
 
     return Agent(
@@ -119,8 +136,9 @@ def create_web_summary_agent() -> Agent:
         ),
         llm=llm,
         tools=[],
-        verbose=True,
+        verbose=False,
         allow_delegation=False,
+        max_retry_limit=0,
     )
 
 def create_document_summary_agent() -> Agent:
@@ -130,6 +148,9 @@ def create_document_summary_agent() -> Agent:
         base_url="http://localhost:11434/v1",
         api_key="ollama",
         temperature=0,
+        timeout=current_settings().llm_timeout,
+        max_retries=0,
+        interceptor=DeadlineInterceptor(),
     )
 
     return Agent(
@@ -148,8 +169,9 @@ def create_document_summary_agent() -> Agent:
         ),
         llm=llm,
         tools=[],
-        verbose=True,
+        verbose=False,
         allow_delegation=False,
+        max_retry_limit=0,
     )
 
 
@@ -160,6 +182,9 @@ def create_relevance_grader_agent() -> Agent:
         base_url="http://localhost:11434/v1",
         api_key="ollama",
         temperature=0,
+        timeout=current_settings().llm_timeout,
+        max_retries=0,
+        interceptor=DeadlineInterceptor(),
     )
 
     return Agent(
@@ -180,8 +205,9 @@ def create_relevance_grader_agent() -> Agent:
         ),
         llm=llm,
         tools=[],
-        verbose=True,
+        verbose=False,
         allow_delegation=False,
+        max_retry_limit=0,
     )
 
 
@@ -192,6 +218,9 @@ def create_grounding_validator_agent() -> Agent:
         base_url="http://localhost:11434/v1",
         api_key="ollama",
         temperature=0,
+        timeout=current_settings().llm_timeout,
+        max_retries=0,
+        interceptor=DeadlineInterceptor(),
     )
 
     return Agent(
@@ -213,7 +242,8 @@ def create_grounding_validator_agent() -> Agent:
         llm=llm,
         tools=[],
         allow_delegation=False,
-        verbose=True,
+        max_retry_limit=0,
+        verbose=False,
     )
 
 
@@ -224,6 +254,9 @@ def create_answer_correction_agent() -> Agent:
         base_url="http://localhost:11434/v1",
         api_key="ollama",
         temperature=0,
+        timeout=current_settings().llm_timeout,
+        max_retries=0,
+        interceptor=DeadlineInterceptor(),
     )
 
     return Agent(
@@ -250,7 +283,8 @@ def create_answer_correction_agent() -> Agent:
         llm=llm,
         tools=[],
         allow_delegation=False,
-        verbose=True,
+        max_retry_limit=0,
+        verbose=False,
     )
 
 

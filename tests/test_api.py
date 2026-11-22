@@ -56,8 +56,14 @@ def test_public_response(api, route, sources, status):
     )
     response = client.post("/api/v1/questions", json={"question": " hello "})
     assert response.status_code == 200
+    public_error = None
+    if status.endswith("failed"):
+        from src.api.routes import DOMAIN_ERRORS
+        kind, message = DOMAIN_ERRORS[status]
+        public_error = dict(type=kind, code="PIPELINE_FAILED", message=message,
+                            request_id=response.headers["X-Request-ID"])
     assert response.json() == dict(question="hello", route=route, status=status,
-        answer="Verified text" if status == "verified" else None, sources=sources, error=error)
+        answer="Verified text" if status == "verified" else None, sources=sources, error=public_error)
     assert "UNTRUSTED" not in response.text
     orchestrator.run.assert_called_once_with("hello")
 
@@ -77,7 +83,10 @@ def test_unexpected_error_is_generic(api):
     orchestrator.run.side_effect = RuntimeError("private credentials")
     response = client.post("/api/v1/questions", json={"question": "hello"})
     assert response.status_code == 500
-    assert response.json() == {"detail": "RAG processing failed. Check server logs."}
+    assert response.json() == {
+        "code": "INTERNAL_ERROR", "message": "The request could not be completed.",
+        "request_id": response.headers["X-Request-ID"],
+    }
 
 
 def test_real_dependency_reuses_factory_across_requests(monkeypatch):
