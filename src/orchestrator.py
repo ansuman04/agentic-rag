@@ -370,10 +370,11 @@ def apply_answer_correction(
     return result
 
 
-def build_local_orchestrator() -> AgentOrchestrator:
+def build_local_orchestrator(store: VectorStore | None = None) -> AgentOrchestrator:
     """Build the local Agentic RAG workflow."""
 
-    store = VectorStore()
+    if store is None:
+        store = VectorStore()
     document_retrieval_service = DocumentRetrievalService(
         vector_store=store
     )

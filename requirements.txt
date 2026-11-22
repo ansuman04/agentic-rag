@@ -3,6 +3,11 @@
 # Agent orchestration
 crewai==1.15.39
 
+# HTTP API
+fastapi==0.165.0
+uvicorn==0.54.0
+pydantic==2.12.5
+
 # Vector database and embeddings
 chromadb==1.5.9
 sentence-transformers==6.2.0
