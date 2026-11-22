@@ -1,5 +1,48 @@
 # Agentic RAG — Local PDF and Web Retrieval with CrewAI, ChromaDB, Tavily, and Ollama
 
+## FastAPI service (P0.1)
+
+From the repository root in PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m uvicorn src.api:app --host 127.0.0.1 --port 8000 --workers 1
+```
+
+Open [interactive API docs](http://127.0.0.1:8000/docs).
+
+- `GET /health` returns `{"status":"ok"}` for process liveness, without loading models or probing providers.
+- `POST /api/v1/questions` accepts `{"question":"Why do Transformers use positional encoding?"}`. Questions are trimmed, must contain 1–10,000 characters, and must be strings. Invalid requests return HTTP 422.
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health
+Invoke-RestMethod http://127.0.0.1:8000/api/v1/questions -Method Post -ContentType 'application/json' -Body '{"question":"Why do Transformers use positional encoding?"}'
+```
+
+The response contains `question`, `route`, `status`, `answer`, `sources`, and `error`.
+`answer` is populated exclusively from the pipeline's `verified_answer` when status is
+`verified`; otherwise it is null. Raw agent output is never returned. `sources` contains
+relevant evidence with existing document metadata (source, page, chunk, document ID,
+distance, text) or web metadata (title, URL, snippet). Rejected or ungraded evidence
+is excluded. Sources are retrieved evidence, not an independent citation audit.
+
+The existing `build_local_orchestrator()` initializes lazily on the first valid question,
+once per application process, and is reused through FastAPI dependency injection.
+Concurrent calls share a lock because CrewAI agents are mutable. The unchanged pipeline
+performs document/web retrieval, relevance grading, grounding, and answer correction.
+Configure Ollama, Tavily, and the document index as described below. Handled pipeline
+failures retain their status and error under HTTP 200; unexpected failures return a
+generic HTTP 500. Initialization failures also return 500 and can retry on a later request.
+
+Use one worker for this local service. It has no authentication or deployment setup.
+P0.1 provides only liveness and questions; ingestion and traditional RAG HTTP endpoints
+are outside this implementation.
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_api.py -q
+.\.venv\Scripts\python.exe -m pytest tests/ -q
+```
+
 An educational and portfolio project that combines **Retrieval-Augmented Generation (RAG)** with **CrewAI-based question routing**. It supports two information sources: locally indexed PDF documents in ChromaDB and public web search through Tavily. Retrieval evidence is preserved separately from relevance-grading decisions and LLM-generated answers, allowing inspection of both accepted and rejected sources.
 
 **Current status (November 10, 2026):** Traditional local PDF RAG works end-to-end. CrewAI routes questions to ChromaDB document retrieval or Tavily web search. A local Qwen2.5 relevance grader evaluates retrieved evidence in a batch, preserving the original results while separating relevant and rejected items. Only relevant evidence is supplied to the document or web summarizer. Recognized grading errors and summarization HTTP 500 errors produce structured failure responses while retaining original evidence. **58 automated tests passed**, as reported from the latest local test run; recent manual executions of both routes succeeded.
@@ -152,7 +195,7 @@ Evidence is retained in the response, not persisted to a separate evidence datab
 - **PDF ingestion is not failure-atomic.** Existing chunks are deleted before replacements are written, and different files with the same name can collide.
 - **Citations are not independently checked.** Returned titles/URLs/page numbers reflect retrieved metadata, but summaries may still misinterpret them.
 - **LLM recovery is limited.** Expected grading `ValueError`/HTTP 500 errors and HTTP 500 summarization errors are handled after retrieval; router failures, other LLM exceptions, malformed source retrieval data, and external API failures may still raise errors.
-- **Not yet a production service.** No API server, authentication, deployment, persistent evaluation results, or operational monitoring is included.
+- **Not yet a production service.** The local FastAPI server has no authentication, deployment setup, persistent evaluation results, or operational monitoring.
 
 ## Project structure
 
