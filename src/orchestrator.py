@@ -9,6 +9,8 @@ from src.relevance_grader import RelevanceGrader
 from src.llm_relevance_scorer import LLMRelevanceScorer
 from src.grounding_validator import GroundingValidator
 from src.llm_grounding_validator import LLMGroundingScorer
+from src.answer_corrector import AnswerCorrector
+from src.llm_answer_corrector import LLMAnswerCorrector
 
 logger = logging.getLogger(__name__)
 
@@ -90,14 +92,18 @@ def build_retrieval_response(
         status = "grading_failed"
     elif error and error.get("type") == "grounding_validation_error":
         status = "grounding_failed"
+    elif error and error.get("type") == "answer_correction_error":
+        status = "correction_failed"
     elif error:
         status = "generation_failed"
     elif not evidence:
         status = "no_evidence"
     elif not relevant_evidence:
         status = "no_relevant_evidence"
+    elif retrieval_result.get("verified_answer") is not None:
+        status = "verified"
     else:
-        status = "retrieved"
+        status = "unverified"
 
     return {
         "question": question,
@@ -107,6 +113,12 @@ def build_retrieval_response(
         "relevant_evidence": relevant_evidence,
         "rejected_evidence": rejected_evidence,
         "agent_output": retrieval_result["agent_output"],
+        "original_answer": retrieval_result.get(
+            "original_answer",
+            retrieval_result.get("agent_output"),
+        ),
+        "verified_answer": retrieval_result.get("verified_answer"),
+        "correction": retrieval_result.get("correction"),
         "grounding": grounding,
         "error": error,
     }
@@ -298,6 +310,65 @@ def validate_generated_answer(
     return result
 
 
+def apply_answer_correction(
+    question: str,
+    retrieval_result: dict,
+    answer_corrector: AnswerCorrector,
+) -> dict:
+    """
+    Correct and revalidate an answer when grounding
+    detects unsupported or insufficiently supported claims.
+
+    Preserve the original generated answer for diagnostics.
+    """
+
+    result = retrieval_result.copy()
+
+    result["original_answer"] = result.get("agent_output")
+    result["verified_answer"] = None
+    result["correction"] = None
+
+    # Do not attempt correction after an upstream failure.
+    if result.get("error") is not None:
+        return result
+
+    answer = result.get("agent_output")
+    evidence = result.get("relevant_evidence") or []
+    grounding = result.get("grounding")
+
+    if not answer or not evidence or grounding is None:
+        return result
+
+    try:
+        correction = answer_corrector.correct(
+            question=question,
+            answer=answer,
+            evidence=evidence,
+            initial_grounding=grounding,
+        )
+
+    except (ValueError, InternalServerError) as exc:
+        logger.warning(
+            "Answer correction failed: %s",
+            exc,
+        )
+
+        result["error"] = {
+            "type": "answer_correction_error",
+            "message": (
+                "Unable to complete answer correction "
+                "and grounding verification."
+            ),
+        }
+
+        return result
+
+    result["correction"] = correction
+    result["verified_answer"] = correction["verified_answer"]
+    result["grounding"] = correction["grounding"]
+
+    return result
+
 
 def build_local_orchestrator() -> AgentOrchestrator:
     """Build the local Agentic RAG workflow."""
@@ -331,6 +402,13 @@ def build_local_orchestrator() -> AgentOrchestrator:
     grounding_validator = GroundingValidator(
         validator=grounding_scorer.score,
     )
+    llm_answer_corrector = LLMAnswerCorrector()
+
+    answer_corrector = AnswerCorrector(
+        corrector=llm_answer_corrector.correct,
+        grounding_validator=grounding_validator,
+    )
+
     def route_question(question: str) -> str:
         task = create_routing_task(
             router_agent,
@@ -355,14 +433,19 @@ def build_local_orchestrator() -> AgentOrchestrator:
         )
 
         # Step 3: Validate generated answer.
-        return validate_generated_answer(
+        validated_result = validate_generated_answer(
             question=question,
             retrieval_result=retrieval_result,
             grounding_validator=grounding_validator,
         )
 
- 
-    
+        # Step 4: Correct once if grounding is incomplete.
+        return apply_answer_correction(
+            question=question,
+            retrieval_result=validated_result,
+            answer_corrector=answer_corrector,
+        )
+
     def search_web(question: str) -> dict:
         # Step 1: Retrieve web evidence from Tavily.
         evidence = web_retrieval_service.retrieve(
@@ -377,12 +460,19 @@ def build_local_orchestrator() -> AgentOrchestrator:
             summary_agent=web_summary_agent,
             task_factory=create_web_summary_task,
         )
-
+        
         # Step 3: Validate generated answer.
-        return validate_generated_answer(
+        validated_result = validate_generated_answer(
             question=question,
             retrieval_result=retrieval_result,
             grounding_validator=grounding_validator,
+        )
+
+        # Step 4: Correct once if grounding is incomplete.
+        return apply_answer_correction(
+            question=question,
+            retrieval_result=validated_result,
+            answer_corrector=answer_corrector,
         )
 
     return AgentOrchestrator(

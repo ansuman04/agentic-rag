@@ -39,7 +39,7 @@ def test_vectorstore_route():
     )
 
     assert result["route"] == "vectorstore"
-    assert result["status"] == "retrieved"
+    assert result["status"] == "unverified"
     assert result["evidence"] == expected_evidence
     assert result["agent_output"] == (
         "Positional encoding represents position."
@@ -128,7 +128,7 @@ def test_websearch_route_calls_web_agent():
     )
 
     assert result["route"] == "websearch"
-    assert result["status"] == "retrieved"
+    assert result["status"] == "unverified"
     assert result["evidence"] == expected_evidence
     assert result["agent_output"] == (
         "Python release summary."

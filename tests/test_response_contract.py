@@ -28,7 +28,7 @@ def test_successful_response_contract(route):
     )
 
     assert result["route"] == route
-    assert result["status"] == "retrieved"
+    assert result["status"] == "unverified"
     assert result["evidence"] == EVIDENCE
     assert result["relevant_evidence"] == [EVIDENCE[0]]
     assert result["rejected_evidence"] == [EVIDENCE[1]]
