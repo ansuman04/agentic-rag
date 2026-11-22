@@ -16,6 +16,10 @@ tavily-python==0.8.5
 # Ollama client for traditional RAG
 ollama==0.6.3
 
+# HTTP API
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+
 # LLM error handling and HTTP tests
 openai==2.54.0
 httpx==0.28.1
