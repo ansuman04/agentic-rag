@@ -185,3 +185,73 @@ def create_relevance_grader_agent() -> Agent:
     )
 
 
+def create_grounding_validator_agent() -> Agent:
+    llm = LLM(
+        model="qwen2.5:7b",
+        custom_openai=True,
+        base_url="http://localhost:11434/v1",
+        api_key="ollama",
+        temperature=0,
+    )
+
+    return Agent(
+        role="Answer Grounding Validator",
+        goal=(
+            "Identify factual claims in generated answers "
+            "and determine whether each claim is supported "
+            "by the supplied evidence."
+        ),
+        backstory=(
+            "You are an evidence verification specialist. "
+            "You carefully examine factual claims in "
+            "AI-generated answers and compare them against "
+            "retrieved document passages or web results. "
+            "You never assume a claim is correct simply "
+            "because it sounds plausible. "
+            "You use only the supplied evidence."
+        ),
+        llm=llm,
+        tools=[],
+        allow_delegation=False,
+        verbose=True,
+    )
+
+
+def create_answer_correction_agent() -> Agent:
+    llm = LLM(
+        model="qwen2.5:7b",
+        custom_openai=True,
+        base_url="http://localhost:11434/v1",
+        api_key="ollama",
+        temperature=0,
+    )
+
+    return Agent(
+        role="Answer Correction Specialist",
+        goal=(
+            "Correct unsupported factual claims in "
+            "generated answers using only the supplied "
+            "retrieved evidence."
+        ),
+        backstory=(
+            "You are an evidence-grounded answer "
+            "correction specialist. "
+            "You receive an original answer, "
+            "relevant evidence, and grounding "
+            "validation results. "
+            "Your responsibility is to repair "
+            "unsupported claims without introducing "
+            "new information. "
+            "Preserve correct information and "
+            "remove claims that cannot be verified. "
+            "If the evidence does not support an "
+            "answer, clearly state the limitation."
+        ),
+        llm=llm,
+        tools=[],
+        allow_delegation=False,
+        verbose=True,
+    )
+
+
+
