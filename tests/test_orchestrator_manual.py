@@ -1,7 +1,6 @@
 
 from src.orchestrator import build_local_orchestrator
 
-
 def display_result(result: dict) -> None:
     print("\n" + "=" * 70)
     print("QUESTION:", result.get("question"))
@@ -57,10 +56,19 @@ def display_result(result: dict) -> None:
     else:
         print("Grounding validation not available.")
 
+    print("Pipeline Status:", result.get("status"))
+    print("Original Answer:", result.get("original_answer"))
+    print("Verified Answer:", result.get("verified_answer"))
+
+    correction = result.get("correction")
+
+    if correction:
+        print("Correction Status:", correction["correction_status"])
+        print("Correction Attempts:", correction["attempts"])
+
     if result.get("error"):
         print("\n===== ERROR =====")
         print(result["error"])
-
 
 def main():
     orchestrator = build_local_orchestrator()
@@ -85,7 +93,6 @@ def main():
                 str(exc),
             )
             raise
-
 
 if __name__ == "__main__":
     main()
