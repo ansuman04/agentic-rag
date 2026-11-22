@@ -7,9 +7,8 @@ import logging
 from openai import InternalServerError
 from src.relevance_grader import RelevanceGrader
 from src.llm_relevance_scorer import LLMRelevanceScorer
-from src.relevance_grader import RelevanceGrader
-from src.llm_relevance_scorer import LLMRelevanceScorer
-from openai import InternalServerError
+from src.grounding_validator import GroundingValidator
+from src.llm_grounding_validator import LLMGroundingScorer
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +34,7 @@ class AgentOrchestrator:
     def __init__(
         self,
         router: Callable[[str], str],
-        retriever: Callable[[str], str],
+        retriever: Callable[[str], dict],
         web_search: Callable[[str], dict] | None = None,
     ):
         self.router = router
@@ -51,13 +50,11 @@ class AgentOrchestrator:
 
         if route == "vectorstore":
             document_result = self.retriever(question)
-
             return build_retrieval_response(
                 question=question,
                 route=route,
                 retrieval_result=document_result,
             )
-
 
         if route == "websearch":
             if self.web_search is None:
@@ -69,17 +66,13 @@ class AgentOrchestrator:
                 }
 
             web_result = self.web_search(question)
-
             return build_retrieval_response(
                 question=question,
                 route=route,
                 retrieval_result=web_result,
             )
 
-
-        raise ValueError(
-            f"Unsupported routing decision: {route!r}"
-        )
+        raise ValueError(f"Unsupported routing decision: {route!r}")
 
 
 def build_retrieval_response(
@@ -88,33 +81,21 @@ def build_retrieval_response(
     retrieval_result: dict,
 ) -> dict:
     evidence = retrieval_result["evidence"]
-
-    relevant_evidence = retrieval_result.get(
-        "relevant_evidence",
-        evidence,
-    )
-
-    rejected_evidence = retrieval_result.get(
-        "rejected_evidence",
-        [],
-    )
-
+    relevant_evidence = retrieval_result.get("relevant_evidence", evidence)
+    rejected_evidence = retrieval_result.get("rejected_evidence", [])
+    grounding = retrieval_result.get("grounding")
     error = retrieval_result.get("error")
 
-    if error and error.get("type") == (
-        "relevance_grading_error"
-    ):
+    if error and error.get("type") == "relevance_grading_error":
         status = "grading_failed"
-
+    elif error and error.get("type") == "grounding_validation_error":
+        status = "grounding_failed"
     elif error:
         status = "generation_failed"
-
     elif not evidence:
         status = "no_evidence"
-
     elif not relevant_evidence:
         status = "no_relevant_evidence"
-
     else:
         status = "retrieved"
 
@@ -126,6 +107,7 @@ def build_retrieval_response(
         "relevant_evidence": relevant_evidence,
         "rejected_evidence": rejected_evidence,
         "agent_output": retrieval_result["agent_output"],
+        "grounding": grounding,
         "error": error,
     }
 
@@ -270,6 +252,52 @@ def grade_and_summarize(
         "error": summary_result["error"],
     }
 
+def validate_generated_answer(
+    question: str,
+    retrieval_result: dict,
+    grounding_validator: GroundingValidator,
+) -> dict:
+    """
+    Validate the generated answer against relevant evidence.
+
+    Preserves the original retrieval result and answer.
+    """
+
+    result = retrieval_result.copy()
+    result["grounding"] = None
+
+    answer = result.get("agent_output")
+    evidence = result.get("relevant_evidence", [])
+
+    # Do not validate if an earlier stage failed.
+    if result.get("error") is not None:
+        return result
+
+    # No answer or relevant evidence to validate.
+    if not answer or not evidence:
+        return result
+
+    try:
+        result["grounding"] = grounding_validator.validate(
+            question=question,
+            answer=answer,
+            evidence=evidence,
+        )
+
+    except (ValueError, InternalServerError) as exc:
+        logger.warning(
+            "Answer grounding validation failed: %s",
+            exc,
+        )
+
+        result["error"] = {
+            "type": "grounding_validation_error",
+            "message": "Unable to validate generated answer.",
+        }
+
+    return result
+
+
 
 def build_local_orchestrator() -> AgentOrchestrator:
     """Build the local Agentic RAG workflow."""
@@ -297,6 +325,12 @@ def build_local_orchestrator() -> AgentOrchestrator:
     relevance_grader = RelevanceGrader(
         scorer=relevance_scorer.score
     )
+    # Initialize answer grounding verification.
+    grounding_scorer = LLMGroundingScorer()
+
+    grounding_validator = GroundingValidator(
+        validator=grounding_scorer.score,
+    )
     def route_question(question: str) -> str:
         task = create_routing_task(
             router_agent,
@@ -306,33 +340,49 @@ def build_local_orchestrator() -> AgentOrchestrator:
 
     
     def retrieve_question(question: str) -> dict:
-        # Step 1: Retrieve original evidence from ChromaDB.
+        # Step 1: Retrieve documents from ChromaDB.
         evidence = document_retrieval_service.retrieve(
             question
         )
 
-        # Step 2: Grade and summarize only relevant evidence.
-        return grade_and_summarize(
+        # Step 2: Grade relevance and summarize.
+        retrieval_result = grade_and_summarize(
             question=question,
             evidence=evidence,
             grader=relevance_grader,
             summary_agent=document_summary_agent,
             task_factory=create_document_summary_task,
         )
+
+        # Step 3: Validate generated answer.
+        return validate_generated_answer(
+            question=question,
+            retrieval_result=retrieval_result,
+            grounding_validator=grounding_validator,
+        )
+
  
+    
     def search_web(question: str) -> dict:
-        # Step 1: Retrieve original evidence from Tavily.
+        # Step 1: Retrieve web evidence from Tavily.
         evidence = web_retrieval_service.retrieve(
             question
         )
 
-        # Step 2: Grade and summarize only relevant evidence.
-        return grade_and_summarize(
+        # Step 2: Grade relevance and summarize.
+        retrieval_result = grade_and_summarize(
             question=question,
             evidence=evidence,
             grader=relevance_grader,
             summary_agent=web_summary_agent,
             task_factory=create_web_summary_task,
+        )
+
+        # Step 3: Validate generated answer.
+        return validate_generated_answer(
+            question=question,
+            retrieval_result=retrieval_result,
+            grounding_validator=grounding_validator,
         )
 
     return AgentOrchestrator(
