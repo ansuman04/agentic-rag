@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from src.resilience import check_deadline, pipeline_error
 from src.document_retrieval import DocumentRetrievalService
 from src.agents import create_document_summary_agent
 from src.tasks import create_document_summary_task
@@ -48,7 +49,9 @@ class AgentOrchestrator:
             raise ValueError("Question cannot be empty.")
 
         question = question.strip()
+        check_deadline()
         route = self.router(question).strip().lower()
+        check_deadline()
 
         if route == "vectorstore":
             document_result = self.retriever(question)
@@ -126,6 +129,7 @@ def build_retrieval_response(
 
 def run_agent(agent, task) -> str:
     """Execute a single CrewAI agent task."""
+    check_deadline()
     crew = Crew(
         agents=[agent],
         tasks=[task],
@@ -135,6 +139,7 @@ def run_agent(agent, task) -> str:
     )
 
     result = crew.kickoff()
+    check_deadline()
     return result.raw
 
 def run_summary_safely(
@@ -158,21 +163,13 @@ def run_summary_safely(
         }
 
     except InternalServerError as exc:
-        logger.warning(
-            "LLM summarization failed after retrieval: %s",
-            exc,
-        )
-
         return {
             "evidence": evidence,
             "agent_output": None,
-            "error": {
-                "type": "llm_generation_error",
-                "message": (
-                    "The LLM server failed while "
-                    "summarizing retrieved evidence."
-                ),
-            },
+            "error": pipeline_error(
+                "llm_generation_error",
+                "The LLM server failed while summarizing retrieved evidence.", exc,
+            ),
         }
 
 
@@ -207,22 +204,14 @@ def grade_and_summarize(
         )
 
     except (ValueError, InternalServerError) as exc:
-        logger.warning(
-            "Relevance grading failed: %s",
-            exc,
-        )
-
         return {
             "evidence": evidence,
             "relevant_evidence": [],
             "rejected_evidence": [],
             "agent_output": None,
-            "error": {
-                "type": "relevance_grading_error",
-                "message": (
-                    "Unable to grade retrieved evidence."
-                ),
-            },
+            "error": pipeline_error(
+                "relevance_grading_error", "Unable to grade retrieved evidence.", exc,
+            ),
         }
 
     relevant_evidence = grading_result[
@@ -297,15 +286,9 @@ def validate_generated_answer(
         )
 
     except (ValueError, InternalServerError) as exc:
-        logger.warning(
-            "Answer grounding validation failed: %s",
-            exc,
+        result["error"] = pipeline_error(
+            "grounding_validation_error", "Unable to validate generated answer.", exc,
         )
-
-        result["error"] = {
-            "type": "grounding_validation_error",
-            "message": "Unable to validate generated answer.",
-        }
 
     return result
 
@@ -348,18 +331,10 @@ def apply_answer_correction(
         )
 
     except (ValueError, InternalServerError) as exc:
-        logger.warning(
-            "Answer correction failed: %s",
-            exc,
+        result["error"] = pipeline_error(
+            "answer_correction_error",
+            "Unable to complete answer correction and grounding verification.", exc,
         )
-
-        result["error"] = {
-            "type": "answer_correction_error",
-            "message": (
-                "Unable to complete answer correction "
-                "and grounding verification."
-            ),
-        }
 
         return result
 

@@ -1,6 +1,6 @@
 # Agentic RAG — Local PDF and Web Retrieval with CrewAI, ChromaDB, Tavily, and Ollama
 
-## FastAPI service (P0.1)
+## Local FastAPI service (P0.1 + P0.2)
 
 From the repository root in PowerShell:
 
@@ -26,22 +26,136 @@ relevant evidence with existing document metadata (source, page, chunk, document
 distance, text) or web metadata (title, URL, snippet). Rejected or ungraded evidence
 is excluded. Sources are retrieved evidence, not an independent citation audit.
 
-The existing `build_local_orchestrator()` initializes lazily on the first valid question,
-once per application process, and is reused through FastAPI dependency injection.
-Concurrent calls share a lock because CrewAI agents are mutable. The unchanged pipeline
-performs document/web retrieval, relevance grading, grounding, and answer correction.
-Configure Ollama, Tavily, and the document index as described below. Handled pipeline
-failures retain their status and error under HTTP 200; unexpected failures return a
-generic HTTP 500. Initialization failures also return 500 and can retry on a later request.
+The existing `build_local_orchestrator()` initializes lazily on valid questions,
+and resources are reused through dependency injection. The default is one active
+execution and one reusable orchestrator per process. Higher configured concurrency
+uses separate orchestrators for each admitted execution so mutable CrewAI agents
+are not shared concurrently. Routing, document/web retrieval, relevance grading,
+grounding, and the one-attempt answer-correction workflow remain in place.
 
-Use one worker for this local service. It has no authentication or deployment setup.
-P0.1 provides only liveness and questions; ingestion and traditional RAG HTTP endpoints
-are outside this implementation.
+### Error handling and HTTP semantics (P0.2)
+
+Errors use a sanitized envelope, without provider messages, prompts, evidence or tracebacks:
+
+```json
+{
+  "code": "DEPENDENCY_UNAVAILABLE",
+  "message": "A required dependency is unavailable.",
+  "request_id": "f6d08785-0be1-4fc3-b00f-2c832c2db028"
+}
+```
+
+Every response has an `X-Request-ID` header. A canonical 36-character inbound UUID
+is accepted and normalized; missing or invalid IDs are replaced with a generated UUID.
+The same ID is included in error bodies and application log records.
+
+| HTTP status | Code / outcome | Meaning |
+| --- | --- | --- |
+| 200 | `verified`, `unverified`, `no_evidence`, `no_relevant_evidence` | Completed pipeline outcome; only verified answers populate `answer`. |
+| 200 | `PIPELINE_FAILED` within `error` | Domain failure, such as invalid grader/grounding output or invalid correction output. The existing `grading_failed`, `generation_failed`, `grounding_failed`, `correction_failed` statuses and all six response fields remain. |
+| 422 | `INVALID_REQUEST` | Invalid JSON/schema, blank, non-string or oversized question, or unknown field. Submitted input is not echoed. |
+| 503 | `DEPENDENCY_UNAVAILABLE` | Recognized connection, authentication, quota, database service, or upstream server failure. |
+| 503 | `SERVICE_BUSY` | All execution slots are occupied. Rejected immediately, before model initialization or worker dispatch. |
+| 504 | `DEPENDENCY_TIMEOUT` | A recognized client/provider timeout or an elapsed configured deadline. |
+| 500 | `INTERNAL_ERROR` | Unexpected failure, including an unclassified exception. |
+
+**P0.1 compatibility change:** structured infrastructure failures now return the 503/504
+envelope rather than a successful HTTP 200 question response. The orchestrator preserves
+its internal error type and adds an infrastructure code when it recognizes the exception.
+`llm_generation_error` is a recognized LLM server failure and maps to 503. The other
+three stage failures are HTTP 200 domain outcomes unless an infrastructure code is
+present. Domain errors retain `type` and a safe `message`, adding `code=PIPELINE_FAILED`
+and `request_id`; arbitrary internal error strings are never copied into the public response.
+Standalone orchestration scripts retain their evidence and diagnostic result fields.
+
+### Configuration, deadlines and retries
+
+Settings are validated as finite positive seconds and a positive integer active limit.
+The API snapshots them at application creation; restart the server after changing them.
+
+| Environment variable | Default | Behavior |
+| --- | --- | --- |
+| `TAVILY_TIMEOUT_SECONDS` | 15 | Tavily search timeout per attempt, clipped to the remaining overall budget. |
+| `CHROMA_TIMEOUT_SECONDS` | 10 | Cooperative elapsed-time budget for local store initialization and search, including embedding work. |
+| `LLM_TIMEOUT_SECONDS` | 60 | CrewAI/OpenAI-compatible client socket timeout; clipped at the transport before each LLM call. |
+| `RAG_TIMEOUT_SECONDS` | 180 | Overall cooperative budget including lazy initialization, checked between dependent stages and after execution. |
+| `RAG_MAX_ACTIVE_REQUESTS` | 1 | Process-local maximum active executions, including initialization. |
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_api.py -q
-.\.venv\Scripts\python.exe -m pytest tests/ -q
+$env:TAVILY_TIMEOUT_SECONDS = "15"
+$env:CHROMA_TIMEOUT_SECONDS = "10"
+$env:LLM_TIMEOUT_SECONDS = "60"
+$env:RAG_TIMEOUT_SECONDS = "180"
+$env:RAG_MAX_ACTIVE_REQUESTS = "1"
+.\.venv\Scripts\python.exe -m uvicorn src.api:app --host 127.0.0.1 --port 8000 --workers 1
 ```
+
+Tavily gets at most **two total attempts**, only for its timeout exception, Requests
+timeouts, or HTTP 503. The SDK caps its per-attempt timeout at 120 seconds. Backoff is jittered between 0.1 and 0.3 seconds. A retry is skipped
+unless enough overall budget remains for backoff and a full configured attempt. Authentication,
+invalid input, other HTTP statuses, and malformed results are not retried. The Tavily client
+session is closed after use. The installed synchronous Tavily SDK has no search retry loop.
+CrewAI's OpenAI SDK retries and agent task-error retries are explicitly disabled to avoid
+nested amplification. The entire pipeline is never retried, and answer correction still has
+at most one attempt. CrewAI may make further calls for output parsing; each call sees the
+remaining deadline through the transport interceptor.
+
+**Blocking-call limitation:** socket timeouts bound network inactivity per phase, not an
+absolute wall-clock duration. Local ChromaDB `PersistentClient` and embedding/model loading
+have no cancellable per-operation timeout. Their budget is checked when they return; a
+hung operation can therefore exceed the configured overall duration. No background worker
+is abandoned and no future cancellation is treated as stopping Ollama. The execution slot
+stays occupied until the blocking worker exits, including on client cancellation. Subsequent
+requests receive `SERVICE_BUSY`; a permanently stuck operation requires a local process
+restart. Slots are released on completion, recognized failure, timeout return, and unexpected
+exception. The semaphore and pool are per application process and do not coordinate across
+multiple Uvicorn workers. Keep one worker for local Ollama use.
+
+Application logs use named loggers without installing global handlers. Completion records
+include `request_id`, HTTP route template, RAG route and pipeline status when available,
+HTTP status, and `duration_ms`. Failure records include exception and cause **types**, not
+exception text or stack locals. CrewAI agents run with verbose output disabled. Structured
+fields live on standard Python `LogRecord` extras; configure your own formatter if you want
+them printed as JSON. Third-party telemetry and custom logging remain separate settings;
+review them before processing private documents. The separate traditional `LocalLLM` demo
+keeps its existing client configuration and is not an HTTP endpoint.
+
+### Local testing and failure reproduction
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_api.py tests/test_api_resilience.py tests/test_web_search_tool.py -q
+.\.venv\Scripts\python.exe -m pytest tests/ -q
+# Full root discovery, including the manual-script directories:
+.\.venv\Scripts\python.exe -m pytest --import-mode=importlib -q
+```
+
+Plain root `pytest` uses pytest's default import mode and encounters the existing duplicate
+`test_orchestrator_manual.py` module names in the root and `tests/`. Use importlib mode
+for full root discovery or target `tests/` as above; no manual files need renaming.
+
+The tests mock dependencies and do not require live Ollama or Tavily. Reproduce key
+scenarios without changing credentials or corrupting the local index:
+
+```powershell
+# Blank input -> 422 without orchestration
+Invoke-RestMethod http://127.0.0.1:8000/api/v1/questions -Method Post -ContentType 'application/json' -Body '{"question":"   "}'
+
+# Mocked unavailable Ollama / failed ChromaDB / safe unexpected error
+.\.venv\Scripts\python.exe -m pytest tests/test_api_resilience.py -q -k dependency_errors
+# Mocked Tavily timeout and exactly two attempts
+.\.venv\Scripts\python.exe -m pytest tests/test_api_resilience.py -q -k tavily
+# Deterministic overload, timeout, and slot-release scenarios
+.\.venv\Scripts\python.exe -m pytest tests/test_api_resilience.py -q -k "concurrent or deadline or budget"
+```
+
+For an optional live unavailable-Ollama check, stop your own Ollama service, send a valid
+question, and inspect the sanitized 503 response and matching `X-Request-ID`; restore Ollama
+afterward. Startup must first have a usable local model cache/index configuration. Health
+remains liveness-only. Configure Ollama, Tavily, and the document index as described below.
+
+Use loopback binding for this local service. There is no authentication or deployment setup.
+Only liveness and questions are exposed; ingestion, Dockerization and P1 features are outside
+this implementation.
 
 An educational and portfolio project that combines **Retrieval-Augmented Generation (RAG)** with **CrewAI-based question routing**. It supports two information sources: locally indexed PDF documents in ChromaDB and public web search through Tavily. Retrieval evidence is preserved separately from relevance-grading decisions and LLM-generated answers, allowing inspection of both accepted and rejected sources.
 

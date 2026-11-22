@@ -57,7 +57,7 @@ def test_web_search_returns_results():
                 search_depth="basic",
                 max_results=5,
                 include_answer=False,
-                timeout=20,
+                timeout=15.0,
             )
 
 

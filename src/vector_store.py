@@ -1,9 +1,28 @@
 
+from functools import wraps
+import sqlite3
+
 import chromadb
 from sentence_transformers import SentenceTransformer
 
+from src.resilience import DependencyUnavailable, current_settings, stage_deadline
+
+
+def bounded_chroma(operation):
+    @wraps(operation)
+    def bounded(*args, **kwargs):
+        try:
+            with stage_deadline(current_settings().chroma_timeout):
+                return operation(*args, **kwargs)
+        except TimeoutError:
+            raise
+        except (OSError, sqlite3.DatabaseError) as exc:
+            raise DependencyUnavailable() from exc
+    return bounded
+
 
 class VectorStore:
+    @bounded_chroma
     def __init__(self, db_path="./chroma_db"):
         self.model = SentenceTransformer(
             "BAAI/bge-small-en-v1.5"
@@ -68,6 +87,7 @@ class VectorStore:
 
         print(f"Indexed {len(records)} chunks for {source}")
 
+    @bounded_chroma
     def search(self, query, top_k=3):
         """Retrieve chunks with their source metadata."""
         if not isinstance(top_k, int) or top_k <= 0:

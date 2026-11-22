@@ -2,6 +2,15 @@
 import json
 import logging
 import os
+import random
+import time
+
+import requests
+from tavily.errors import TimeoutError as TavilyTimeout
+from src.resilience import (
+    DependencyUnavailable, current_settings, check_deadline, remaining_budget, stage_timeout,
+    log_failure,
+)
 
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
@@ -42,22 +51,38 @@ class WebSearchTool(BaseTool):
         api_key = os.getenv("TAVILY_API_KEY")
 
         if not api_key:
-            raise RuntimeError(
+            raise DependencyUnavailable(
                 "TAVILY_API_KEY is not configured."
             )
 
-        logger.info("Tavily web search started: %s", query)
+        logger.info("Tavily web search started")
 
         try:
             client = TavilyClient(api_key=api_key)
 
-            response = client.search(
-                query=query,
-                search_depth="basic",
-                max_results=5,
-                include_answer=False,
-                timeout=20,
-            )
+            try:
+                for attempt in range(2):
+                    try:
+                        response = client.search(
+                            query=query, search_depth="basic", max_results=5,
+                            include_answer=False,
+                            timeout=stage_timeout(current_settings().tavily_timeout),
+                        )
+                        check_deadline()
+                        break
+                    except (TavilyTimeout, requests.exceptions.Timeout,
+                            requests.exceptions.HTTPError) as exc:
+                        status = getattr(getattr(exc, "response", None), "status_code", None)
+                        transient = isinstance(exc, (TavilyTimeout, requests.exceptions.Timeout)) or status == 503
+                        if attempt == 1 or not transient:
+                            raise
+                        delay = random.uniform(0.1, 0.3)
+                        # Reserve a full configured attempt rather than racing the deadline.
+                        if remaining_budget() <= delay + current_settings().tavily_timeout:
+                            raise
+                        time.sleep(delay)
+            finally:
+                client.close()
 
             evidence = [
                 {
@@ -81,9 +106,6 @@ class WebSearchTool(BaseTool):
                 ensure_ascii=False,
             )
 
-        except Exception:
-            logger.exception(
-                "Tavily search failed for query: %s",
-                query,
-            )
+        except Exception as exc:
+            log_failure(exc, "tavily_search")
             raise

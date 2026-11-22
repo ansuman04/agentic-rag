@@ -27,3 +27,9 @@ class QuestionResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
+
+
+class ErrorResponse(BaseModel):
+    code: str
+    message: str
+    request_id: str
